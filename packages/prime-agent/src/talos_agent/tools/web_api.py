@@ -51,11 +51,17 @@ async def check_approval(approval_id: str) -> dict:
 
 
 @tool("report_revenue", "Report revenue earned from a service or transaction")
-async def report_revenue(amount: float, source: str, tx_hash: str = "") -> dict:
+async def report_revenue(amount: float | str, source: str, tx_hash: str = "") -> dict:
+    from talos_agent.payments.stellar_kit import format_stellar_amount, to_stellar_amount
+
+    amount_dec = to_stellar_amount(amount)
+    formatted_amount = format_stellar_amount(amount_dec)
     result = await _api.report_revenue(
         _settings.talos_id,
-        amount=amount,
+        amount=float(formatted_amount),
         source=source,
         tx_hash=tx_hash or None,
     )
-    return result or {"status": "reported"}
+    if result:
+        return result
+    return {"status": "reported", "amount": formatted_amount}

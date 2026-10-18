@@ -13,6 +13,7 @@ text, seeds, payment proofs, or response bodies are ever surfaced.
 from __future__ import annotations
 
 import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -27,8 +28,29 @@ from talos_agent.payments.stellar_retry import (
 )
 
 _HORIZON_URL = os.getenv("STELLAR_HORIZON_URL", "https://horizon-testnet.stellar.org")
+_SEVEN_DECIMALS = Decimal("0.0000001")
 
 console = Console()
+
+
+def to_stellar_amount(value: Decimal | float | int | str) -> Decimal:
+    """Parse a numeric or string value to Decimal with exact precision.
+
+    Float inputs are converted via str(value) to avoid binary float artifacts
+    where possible, while Decimal and string inputs retain exact precision.
+    """
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, str)):
+        return Decimal(str(value).strip())
+    # float input
+    return Decimal(str(value))
+
+
+def format_stellar_amount(amount: Decimal | float | int | str) -> str:
+    """Serialize an on-chain Stellar amount as a string with exactly 7 decimal places."""
+    d = to_stellar_amount(amount)
+    return f"{d.quantize(_SEVEN_DECIMALS):f}"
 
 
 class StellarKit:
@@ -77,8 +99,18 @@ class StellarKit:
                     balance = data.get("balances", [])
                     xlm_balance = next((b for b in balance if b.get("asset_type") == "native"), None)
                     if xlm_balance:
-                        return {"balance_xlm": float(xlm_balance["balance"]), "account": acct}
-                    return {"balance_xlm": 0, "account": acct}
+                        dec_val = Decimal(str(xlm_balance["balance"]))
+                        return {
+                            "balance_xlm": format_stellar_amount(dec_val),
+                            "balance_xlm_decimal": dec_val,
+                            "account": acct,
+                        }
+                    zero_dec = Decimal("0")
+                    return {
+                        "balance_xlm": format_stellar_amount(zero_dec),
+                        "balance_xlm_decimal": zero_dec,
+                        "account": acct,
+                    }
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
@@ -101,8 +133,13 @@ class StellarKit:
                     data = r.json()
                     balances = data.get("balances", [])
                     token_balance = next((b for b in balances if b.get("asset_code") == token_id), None)
-                    balance = float(token_balance["balance"]) if token_balance else 0
-                    return {"balance": balance, "token_id": token_id, "account": account_id}
+                    dec_val = Decimal(str(token_balance["balance"])) if token_balance else Decimal("0")
+                    return {
+                        "balance": format_stellar_amount(dec_val),
+                        "balance_decimal": dec_val,
+                        "token_id": token_id,
+                        "account": account_id,
+                    }
             return attach_stellar_failure(
                 None,
                 classify_stellar_failure(status_code=r.status_code),
@@ -113,7 +150,7 @@ class StellarKit:
                 classify_stellar_failure(exc=exc),
             )
 
-    async def transfer_xlm(self, to_account: str, amount: float) -> dict[str, Any]:
+    async def transfer_xlm(self, to_account: str, amount: Decimal | float | str) -> dict[str, Any]:
         """Request XLM transfer via Web API (Web handles signing).
 
         On failure the returned dict carries ``error`` plus the bounded
@@ -122,8 +159,10 @@ class StellarKit:
         the historical ``{"status": "submitted", ...}`` shape.
         """
         try:
+            dec_amount = to_stellar_amount(amount)
+            formatted_amount = format_stellar_amount(dec_amount)
             result = await self._api.request_transfer(
-                to_account=to_account, amount=amount, currency="XLM"
+                to_account=to_account, amount=formatted_amount, currency="XLM"
             )
         except Exception as exc:
             return attach_stellar_failure(None, classify_stellar_failure(exc=exc))
@@ -133,7 +172,7 @@ class StellarKit:
             return attach_stellar_failure(result, failure)
 
         if result:
-            return {"status": "submitted", "to": to_account, "amount": amount}
+            return {"status": "submitted", "to": to_account, "amount": formatted_amount}
 
         # Empty response with no error payload — surface an unclassified failure.
         return attach_stellar_failure(None, classify_stellar_failure())
